@@ -7,11 +7,7 @@ import r3.hash.hash256
 import r3.http.HandlerFactory
 import r3.http.WebServer
 import r3.math.EncryptedSequence
-import r3.pack.BinaryPack
-import r3.pack.DirPack
-import r3.pack.Pack
-import r3.pack.RAMPack
-import r3.pack.ZipPack
+import r3.pack.*
 import r3.pke.Password256
 import r3.source.FileSink
 import r3.source.FileSource
@@ -22,45 +18,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.URI
 import kotlin.concurrent.thread
-
-class JoinPack(val packs: List<Pack>) : Pack {
-	constructor(vararg packs: Pack) : this(packs.toList())
-
-	override val keys: Set<String>
-		get() {
-			val resultSet = LinkedHashSet<String>()
-			for (p in packs) {
-				p.visit { k, _ ->
-					resultSet.add(k)
-				}
-			}
-			return resultSet
-		}
-
-	override val size: Int
-		get() = keys.size
-
-	override fun get(key: String): Content? {
-		for (p in packs) {
-			val content = p[key]
-			if (content != null) {
-				return content
-			}
-		}
-		return null
-	}
-
-	override fun visit(visitor: (String, Content) -> Unit) {
-		val visitedKeys = HashSet<String>()
-		for (p in packs) {
-			p.visit { k, content ->
-				if (visitedKeys.add(k)) {
-					visitor(k, content)
-				}
-			}
-		}
-	}
-}
 
 fun main(args: Array<String>) {
 	if (args.isEmpty()) {
@@ -76,12 +33,15 @@ fun main(args: Array<String>) {
 				printUsage()
 				return
 			}
-
 			val outputFile: File
 			val passwordStr: String?
 			val inputFiles: List<File>
 
-			if (createArgs.size >= 3 && (createArgs[createArgs.size - 2].endsWith(".pack", ignoreCase = true) || createArgs[createArgs.size - 2].endsWith(".epack", ignoreCase = true))) {
+			if (createArgs.size >= 3 && (createArgs[createArgs.size - 2].endsWith(
+					".pack",
+					ignoreCase = true
+				) || createArgs[createArgs.size - 2].endsWith(".epack", ignoreCase = true))
+			) {
 				outputFile = File(createArgs[createArgs.size - 2])
 				passwordStr = createArgs.last()
 				inputFiles = createArgs.take(createArgs.size - 2).map { File(it) }
@@ -90,76 +50,26 @@ fun main(args: Array<String>) {
 				passwordStr = null
 				inputFiles = createArgs.take(createArgs.size - 1).map { File(it) }
 			}
-
 			val packs = inputFiles.mapNotNull { loadInputAsPack(it) }
 			if (packs.isEmpty()) {
 				println("Error: No valid inputs provided for archive creation.")
 				return
 			}
-
-			val combinedPack = JoinPack(packs)
-
-			println("Creating archive ${outputFile.name} with ${combinedPack.size} entries from ${packs.size} input source(s)...")
+			val contentList = ArrayList<Content>()
+			for (p in packs) {
+				contentList.addAll(p)
+			}
 			val sink = FileSink(outputFile, append = false)
 			val isEncrypted = outputFile.name.endsWith(".epack", ignoreCase = true) || !passwordStr.isNullOrEmpty()
 			if (isEncrypted) {
 				val finalPasswordStr = passwordStr.takeIf { !it.isNullOrEmpty() }
 					?: readPassword("Enter password for encrypted pack creation: ")
 				val password = Password256(finalPasswordStr.toByteArray().hash256())
-				createEncryptedPack(combinedPack, password, sink)
+				createEncryptedPack(RAMPack(contentList), password, sink)
 			} else {
-				BinaryPack.create(combinedPack, sink)
+				BinaryPack.create(RAMPack(contentList), sink)
 			}
 			println("Archive created successfully.")
-		}
-
-		"--append" -> {
-			val appendArgs = args.drop(1)
-			if (appendArgs.size < 2) {
-				println("Error: Missing required arguments for --append")
-				printUsage()
-				return
-			}
-
-			val targetFile: File
-			val passwordStr: String?
-			val inputFiles: List<File>
-
-			if (appendArgs.size >= 3 && (appendArgs[appendArgs.size - 2].endsWith(".pack", ignoreCase = true) || appendArgs[appendArgs.size - 2].endsWith(".epack", ignoreCase = true))) {
-				targetFile = File(appendArgs[appendArgs.size - 2])
-				passwordStr = appendArgs.last()
-				inputFiles = appendArgs.take(appendArgs.size - 2).map { File(it) }
-			} else {
-				targetFile = File(appendArgs.last())
-				passwordStr = null
-				inputFiles = appendArgs.take(appendArgs.size - 1).map { File(it) }
-			}
-
-			if (!targetFile.exists()) {
-				println("Error: Target file ${targetFile.path} does not exist for append operation.")
-				return
-			}
-
-			val packs = inputFiles.mapNotNull { loadInputAsPack(it) }
-			if (packs.isEmpty()) {
-				println("Error: No valid inputs provided for append operation.")
-				return
-			}
-
-			val combinedPack = JoinPack(packs)
-			val isEncrypted = targetFile.name.endsWith(".epack", ignoreCase = true) || !passwordStr.isNullOrEmpty()
-
-			println("Appending ${combinedPack.size} entries from ${packs.size} input source(s) to ${targetFile.name}...")
-			if (isEncrypted) {
-				val finalPasswordStr = passwordStr.takeIf { !it.isNullOrEmpty() }
-					?: readPassword("Enter password for encrypted pack append: ")
-				val password = Password256(finalPasswordStr.toByteArray().hash256())
-				appendToEncryptedPack(combinedPack, password, targetFile)
-			} else {
-				val sink = FileSink(targetFile, append = true)
-				BinaryPack.append(combinedPack, sink)
-			}
-			println("Archive updated successfully.")
 		}
 
 		"--view" -> {
@@ -167,7 +77,6 @@ fun main(args: Array<String>) {
 			var passwordStr: String? = null
 			var templatePack: Pack? = null
 			var overrideTemplate = false
-
 			var i = 1
 			while (i < args.size) {
 				when (args[i]) {
@@ -177,9 +86,11 @@ fun main(args: Array<String>) {
 							templatePack = loadTemplatePack(tFile)
 						}
 					}
+
 					"-o", "--override" -> {
 						overrideTemplate = true
 					}
+
 					else -> {
 						if (packFile == null) {
 							packFile = File(args[i])
@@ -201,7 +112,6 @@ fun main(args: Array<String>) {
 				println("Error: Pack file ${packFile.path} does not exist.")
 				return
 			}
-
 			val pack = openPackFile(packFile, passwordStr, "view")
 			viewPack(pack, templatePack, overrideTemplate)
 		}
@@ -220,7 +130,7 @@ fun main(args: Array<String>) {
 				return
 			}
 			val pack = openPackFile(packFile, passwordStr, "list")
-			pack.keys.forEach { println(it) }
+			pack.forEach { println(it) }
 		}
 
 		"--extract" -> {
@@ -239,7 +149,8 @@ fun main(args: Array<String>) {
 			}
 			val pack = openPackFile(packFile, passwordStr, "extract")
 
-			pack.visit { path, content ->
+			for (content in pack) {
+				val path = content.path
 				val destFile = File(outputDir, path)
 				destFile.parentFile?.mkdirs()
 				content.createInputStream().use { input ->
@@ -270,10 +181,10 @@ fun loadInputAsPack(file: File): Pack? {
 		file.name.endsWith(".epack", ignoreCase = true) -> openPackFile(file, actionName = "load input pack")
 		file.name.endsWith(".pack", ignoreCase = true) -> BinaryPack(FileSource(file))
 		file.isFile -> {
-			val pack = RAMPack()
-			pack[file.name] = FileContent(file, root = "", path = file.name)
+			val pack = RAMPack(listOf(FileContent(file, root = "", path = file.name)))
 			pack
 		}
+
 		else -> {
 			println("Warning: Unsupported input type for ${file.name}. Skipping.")
 			null
@@ -314,9 +225,7 @@ fun getDefaultTemplatePack(): Pack {
 	val bytes = stream?.use { it.readBytes() }
 		?: error("Failed to load default playlist template resource from classpath ($resourcePath)")
 
-	val pack = RAMPack()
-	pack["index.html"] = BinaryContent(bytes, "index.html", "html")
-	return pack
+	return RAMPack(listOf(BinaryContent(bytes, "index.html", "html")))
 }
 
 private fun loadTemplatePack(file: File): Pack? {
@@ -356,14 +265,6 @@ fun createEncryptedPack(pack: Pack, pass: Password256, sink: Sink) {
 	val sequence = EncryptedSequence.createSequence(pass)
 	val encryptedSink = EncryptedSink(sequence, sink)
 	BinaryPack.create(pack, encryptedSink)
-}
-
-fun appendToEncryptedPack(pack: Pack, pass: Password256, targetFile: File) {
-	val initialPos = targetFile.length()
-	val sequence = EncryptedSequence.createSequence(pass)
-	val sink = FileSink(targetFile, append = true)
-	val encryptedSink = EncryptedSink(sequence, sink, initialPos = initialPos)
-	BinaryPack.append(pack, encryptedSink)
 }
 
 fun accessEncryptedBinaryPack(src: Source, pass: Password256): Pack {
