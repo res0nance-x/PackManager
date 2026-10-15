@@ -1,5 +1,6 @@
 import r3.content.BinaryContent
 import r3.content.Content
+import r3.content.ContentMeta
 import r3.content.FileContent
 import r3.encryption.EncryptedSink
 import r3.encryption.EncryptedSource
@@ -13,7 +14,9 @@ import r3.source.FileSink
 import r3.source.FileSource
 import r3.source.Sink
 import r3.source.Source
+import r3.util.humanReadableSize
 import java.awt.Desktop
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URI
@@ -59,17 +62,26 @@ fun main(args: Array<String>) {
 			for (p in packs) {
 				contentList.addAll(p)
 			}
-			val sink = FileSink(outputFile, append = false)
+			val totalBytes = contentList.sumOf { it.length }
 			val isEncrypted = outputFile.name.endsWith(".epack", ignoreCase = true) || !passwordStr.isNullOrEmpty()
+			val tracker = ConsoleProgressBar(totalBytes, contentList.size)
+
+			println("Creating archive: ${outputFile.name} (${totalBytes.humanReadableSize()}, ${contentList.size} files)...")
+
+			val sink = FileSink(outputFile, append = false)
 			if (isEncrypted) {
 				val finalPasswordStr = passwordStr.takeIf { !it.isNullOrEmpty() }
 					?: readPassword("Enter password for encrypted pack creation: ")
 				val password = Password256(finalPasswordStr.toByteArray().hash256())
-				createEncryptedPack(RAMPack(contentList), password, sink)
+				createEncryptedPack(contentList, password, sink) { copied, _, file ->
+					tracker.update(copied, file)
+				}
 			} else {
-				BinaryPack.create(RAMPack(contentList), sink)
+				createPackWithProgress(contentList, sink) { copied, _, file ->
+					tracker.update(copied, file)
+				}
 			}
-			println("Archive created successfully.")
+			tracker.finish()
 		}
 
 		"--view" -> {
@@ -149,16 +161,24 @@ fun main(args: Array<String>) {
 			}
 			val pack = openPackFile(packFile, passwordStr, "extract")
 
+			val totalCount = pack.count()
+			var extractedCount = 0
+			val buffer = ByteArray(PACK_BUFFER_SIZE)
 			for (content in pack) {
 				val path = content.path
 				val destFile = File(outputDir, path)
 				destFile.parentFile?.mkdirs()
 				content.createInputStream().use { input ->
-					FileOutputStream(destFile).use { output ->
-						input.copyTo(output)
+					FileOutputStream(destFile).buffered(PACK_BUFFER_SIZE).use { output ->
+						var read = input.read(buffer)
+						while (read >= 0) {
+							if (read > 0) output.write(buffer, 0, read)
+							read = input.read(buffer)
+						}
 					}
 				}
-				println("Extracted: $path")
+				extractedCount++
+				println("Extracted ($extractedCount/$totalCount): $path")
 			}
 			println("Extraction completed.")
 		}
@@ -261,10 +281,138 @@ private fun printUsage() {
 	)
 }
 
-fun createEncryptedPack(pack: Pack, pass: Password256, sink: Sink) {
+const val PACK_BUFFER_SIZE = 8 * 1024 * 1024 // 8 MB buffer to minimize HDD seek thrashing
+
+fun createPackWithProgress(
+	contentList: List<Content>,
+	sink: Sink,
+	bufferSize: Int = PACK_BUFFER_SIZE,
+	onProgress: (bytesCopied: Long, totalBytes: Long, currentFile: String) -> Unit = { _, _, _ -> }
+) {
+	val totalBytes = contentList.sumOf { it.length }
+	val totalFiles = contentList.size
+	val buffer = ByteArray(bufferSize)
+
+	sink.createOutputStream().buffered(bufferSize).use { ostream ->
+		DataOutputStream(ostream).use { dos ->
+			var bytesCopied = 0L
+			var fileCount = 0
+
+			contentList.forEach { item ->
+				ContentMeta(item).write(dos)
+				item.createInputStream().use { istream ->
+					var read = istream.read(buffer)
+					while (read >= 0) {
+						if (read > 0) {
+							dos.write(buffer, 0, read)
+							bytesCopied += read
+							onProgress(bytesCopied, totalBytes, item.path)
+						}
+						read = istream.read(buffer)
+					}
+				}
+				fileCount++
+				if (totalBytes == 0L) {
+					onProgress(fileCount.toLong(), totalFiles.toLong(), item.path)
+				} else {
+					onProgress(bytesCopied, totalBytes, item.path)
+				}
+			}
+		}
+	}
+}
+
+class ConsoleProgressBar(private val totalBytes: Long, private val totalFiles: Int) {
+	private val startTime = System.currentTimeMillis()
+	private var lastPrintTime = 0L
+	private var lastLineLen = 0
+
+	fun update(bytesCopied: Long, currentFile: String, force: Boolean = false) {
+		val now = System.currentTimeMillis()
+		if (!force && now - lastPrintTime < 150) return // Throttle console updates (~7 FPS)
+		lastPrintTime = now
+
+		val elapsedSec = (now - startTime).coerceAtLeast(1) / 1000.0
+		val speed = bytesCopied / elapsedSec
+		val pct = if (totalBytes > 0) {
+			((bytesCopied.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 100)
+		} else {
+			100
+		}
+
+		val barWidth = 25
+		val filled = if (totalBytes > 0) {
+			((bytesCopied.toDouble() / totalBytes) * barWidth).toInt().coerceIn(0, barWidth)
+		} else {
+			barWidth
+		}
+		val bar = StringBuilder()
+		for (i in 0 until barWidth) {
+			when {
+				i < filled -> bar.append("=")
+				i == filled && filled < barWidth -> bar.append(">")
+				else -> bar.append(" ")
+			}
+		}
+
+		val etaStr = if (speed > 1024 && totalBytes > bytesCopied) {
+			val remainingSec = ((totalBytes - bytesCopied) / speed).toLong()
+			formatDuration(remainingSec)
+		} else {
+			"--:--"
+		}
+
+		val speedStr = "${speed.toLong().humanReadableSize()}/s"
+		val copiedStr = bytesCopied.humanReadableSize()
+		val totalStr = totalBytes.humanReadableSize()
+
+		val displayFile = if (currentFile.length > 30) {
+			"..." + currentFile.takeLast(27)
+		} else {
+			currentFile
+		}
+
+		val line = "\r[%s] %3d%%  %s / %s  (%s, ETA: %s)  %s".format(
+			bar.toString(), pct, copiedStr, totalStr, speedStr, etaStr, displayFile
+		)
+		val padding = " ".repeat((lastLineLen - line.length).coerceAtLeast(0))
+		print(line + padding)
+		lastLineLen = line.length
+	}
+
+	fun finish() {
+		val totalSec = ((System.currentTimeMillis() - startTime) / 1000.0).coerceAtLeast(0.001)
+		val avgSpeed = (totalBytes / totalSec).toLong().humanReadableSize()
+		val clearLine = "\r" + " ".repeat(lastLineLen.coerceAtLeast(80)) + "\r"
+		print(clearLine)
+		println("Archive created successfully in ${formatDuration(totalSec.toLong())} ($avgSpeed/s avg, $totalFiles files).")
+	}
+
+	private fun formatDuration(seconds: Long): String {
+		val mins = seconds / 60
+		val secs = seconds % 60
+		val hours = mins / 60
+		return if (hours > 0) {
+			"%dh %02dm".format(hours, mins % 60)
+		} else {
+			"%02dm %02ds".format(mins, secs)
+		}
+	}
+}
+
+fun createEncryptedPack(
+	pack: List<Content>,
+	pass: Password256,
+	sink: Sink,
+	onProgress: (bytesCopied: Long, totalBytes: Long, currentFile: String) -> Unit = { _, _, _ -> }
+) {
 	val sequence = EncryptedSequence.createSequence(pass)
 	val encryptedSink = EncryptedSink(sequence, sink)
-	BinaryPack.create(pack, encryptedSink)
+	createPackWithProgress(pack, encryptedSink, onProgress = onProgress)
+}
+
+fun createEncryptedPack(pack: Pack, pass: Password256, sink: Sink) {
+	createEncryptedPack(pack.toList(), pass, sink)
 }
 
 fun accessEncryptedBinaryPack(src: Source, pass: Password256): Pack {
