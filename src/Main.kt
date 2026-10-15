@@ -281,7 +281,7 @@ private fun printUsage() {
 	)
 }
 
-const val PACK_BUFFER_SIZE = 8 * 1024 * 1024 // 8 MB buffer to minimize HDD seek thrashing
+const val PACK_BUFFER_SIZE = 512 * 1024 // Large buffer to minimize HDD seek thrashing
 
 fun createPackWithProgress(
 	contentList: List<Content>,
