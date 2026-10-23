@@ -62,6 +62,7 @@ fun main(args: Array<String>) {
 			for (p in packs) {
 				contentList.addAll(p)
 			}
+			contentList.sortWith { a, b -> a.path.compareTo(b.path) }
 			val totalBytes = contentList.sumOf { it.length }
 			val isEncrypted = outputFile.name.endsWith(".epack", ignoreCase = true) || !passwordStr.isNullOrEmpty()
 			val tracker = ConsoleProgressBar(totalBytes, contentList.size)
@@ -77,6 +78,68 @@ fun main(args: Array<String>) {
 					tracker.update(copied, file)
 				}
 			} else {
+				createPackWithProgress(contentList, sink) { copied, _, file ->
+					tracker.update(copied, file)
+				}
+			}
+			tracker.finish()
+		}
+
+		"--append" -> {
+			val appendArgs = args.drop(1)
+			if (appendArgs.size < 2) {
+				println("Error: Missing required arguments for --append")
+				printUsage()
+				return
+			}
+			val targetFile: File
+			val passwordStr: String?
+			val inputFiles: List<File>
+
+			if (appendArgs.size >= 3 && (appendArgs[appendArgs.size - 2].endsWith(
+					".pack",
+					ignoreCase = true
+				) || appendArgs[appendArgs.size - 2].endsWith(".epack", ignoreCase = true))
+			) {
+				targetFile = File(appendArgs[appendArgs.size - 2])
+				passwordStr = appendArgs.last()
+				inputFiles = appendArgs.take(appendArgs.size - 2).map { File(it) }
+			} else {
+				targetFile = File(appendArgs.last())
+				passwordStr = null
+				inputFiles = appendArgs.take(appendArgs.size - 1).map { File(it) }
+			}
+
+			if (!targetFile.exists()) {
+				println("Error: Target file ${targetFile.path} does not exist for append operation.")
+				return
+			}
+
+			val packs = inputFiles.mapNotNull { loadInputAsPack(it) }
+			if (packs.isEmpty()) {
+				println("Error: No valid inputs provided for append operation.")
+				return
+			}
+			val contentList = ArrayList<Content>()
+			for (p in packs) {
+				contentList.addAll(p)
+			}
+			contentList.sortWith { a, b -> a.path.compareTo(b.path) }
+			val totalBytes = contentList.sumOf { it.length }
+			val isEncrypted = targetFile.name.endsWith(".epack", ignoreCase = true) || !passwordStr.isNullOrEmpty()
+			val tracker = ConsoleProgressBar(totalBytes, contentList.size)
+
+			println("Appending to archive: ${targetFile.name} (${totalBytes.humanReadableSize()}, ${contentList.size} files)...")
+
+			if (isEncrypted) {
+				val finalPasswordStr = passwordStr.takeIf { !it.isNullOrEmpty() }
+					?: readPassword("Enter password for encrypted pack append: ")
+				val password = Password256(finalPasswordStr.toByteArray().hash256())
+				appendToEncryptedPack(contentList, password, targetFile) { copied, _, file ->
+					tracker.update(copied, file)
+				}
+			} else {
+				val sink = FileSink(targetFile, append = true)
 				createPackWithProgress(contentList, sink) { copied, _, file ->
 					tracker.update(copied, file)
 				}
@@ -142,7 +205,7 @@ fun main(args: Array<String>) {
 				return
 			}
 			val pack = openPackFile(packFile, passwordStr, "list")
-			pack.forEach { println(it) }
+			pack.sortedWith { a, b -> a.path.compareTo(b.path) }.forEach { println(it) }
 		}
 
 		"--extract" -> {
@@ -413,6 +476,23 @@ fun createEncryptedPack(
 
 fun createEncryptedPack(pack: Pack, pass: Password256, sink: Sink) {
 	createEncryptedPack(pack.toList(), pass, sink)
+}
+
+fun appendToEncryptedPack(
+	contentList: List<Content>,
+	pass: Password256,
+	targetFile: File,
+	onProgress: (bytesCopied: Long, totalBytes: Long, currentFile: String) -> Unit = { _, _, _ -> }
+) {
+	val initialPos = targetFile.length()
+	val sequence = EncryptedSequence.createSequence(pass)
+	val sink = FileSink(targetFile, append = true)
+	val encryptedSink = EncryptedSink(sequence, sink, initialPos = initialPos)
+	createPackWithProgress(contentList, encryptedSink, onProgress = onProgress)
+}
+
+fun appendToEncryptedPack(pack: Pack, pass: Password256, targetFile: File) {
+	appendToEncryptedPack(pack.toList(), pass, targetFile)
 }
 
 fun accessEncryptedBinaryPack(src: Source, pass: Password256): Pack {
