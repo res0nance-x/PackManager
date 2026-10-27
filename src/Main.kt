@@ -261,6 +261,7 @@ fun loadInputAsPack(file: File): Pack? {
 	return when {
 		file.isDirectory -> DirPack(file)
 		file.name.endsWith(".zip", ignoreCase = true) -> ZipPack(file)
+		file.name.endsWith(".mhtml", ignoreCase = true) || file.name.endsWith(".mht", ignoreCase = true) -> MhtmlPack(file)
 		file.name.endsWith(".epack", ignoreCase = true) -> openPackFile(file, actionName = "load input pack")
 		file.name.endsWith(".pack", ignoreCase = true) -> BinaryPack(FileSource(file))
 		file.isFile -> {
@@ -283,6 +284,10 @@ fun openPackFile(packFile: File, passwordStr: String? = null, actionName: String
 			?: readPassword("Enter password to $actionName encrypted pack: ")
 		val pass = Password256(finalPassword.toByteArray().hash256())
 		accessEncryptedBinaryPack(source, pass)
+	} else if (packFile.name.endsWith(".mhtml", ignoreCase = true) || packFile.name.endsWith(".mht", ignoreCase = true)) {
+		MhtmlPack(packFile)
+	} else if (packFile.name.endsWith(".zip", ignoreCase = true)) {
+		ZipPack(packFile)
 	} else {
 		BinaryPack(source)
 	}
@@ -337,9 +342,9 @@ private fun printUsage() {
 		Usage:
 		  PackManager --create <input1> [input2 ...] <output.pack|epack> [password]
 		  PackManager --append <input1> [input2 ...] <target.pack|epack> [password]
-		  PackManager --view <packFile|epackFile> [password] [--template <dir|zip|pack|epack>] [--override]
-		  PackManager --list <packFile|epackFile> [password]
-		  PackManager --extract <packFile|epackFile> <outputDir> [password]
+		  PackManager --view <packFile|epackFile|mhtmlFile> [password] [--template <dir|zip|pack|epack>] [--override]
+		  PackManager --list <packFile|epackFile|mhtmlFile> [password]
+		  PackManager --extract <packFile|epackFile|mhtmlFile> <outputDir> [password]
 	""".trimIndent()
 	)
 }
