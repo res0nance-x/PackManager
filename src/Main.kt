@@ -1,6 +1,5 @@
 import r3.content.BinaryContent
 import r3.content.Content
-import r3.content.ContentMeta
 import r3.content.FileContent
 import r3.encryption.EncryptedSink
 import r3.encryption.EncryptedSource
@@ -16,7 +15,6 @@ import r3.source.Sink
 import r3.source.Source
 import r3.util.humanReadableSize
 import java.awt.Desktop
-import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URI
@@ -263,7 +261,7 @@ fun loadInputAsPack(file: File): Pack? {
 		file.name.endsWith(".zip", ignoreCase = true) -> ZipPack(file)
 		file.name.endsWith(".mhtml", ignoreCase = true) || file.name.endsWith(".mht", ignoreCase = true) -> MhtmlPack(file)
 		file.name.endsWith(".epack", ignoreCase = true) -> openPackFile(file, actionName = "load input pack")
-		file.name.endsWith(".pack", ignoreCase = true) -> BinaryPack(FileSource(file))
+		file.name.endsWith(".pack", ignoreCase = true) -> openPackFile(file, actionName = "load input pack")
 		file.isFile -> {
 			val pack = RAMPack(listOf(FileContent(file, root = "", path = file.name)))
 			pack
@@ -289,7 +287,7 @@ fun openPackFile(packFile: File, passwordStr: String? = null, actionName: String
 	} else if (packFile.name.endsWith(".zip", ignoreCase = true)) {
 		ZipPack(packFile)
 	} else {
-		BinaryPack(source)
+		BinaryPack.open(source)
 	}
 }
 
@@ -328,7 +326,7 @@ private fun loadTemplatePack(file: File): Pack? {
 		file.isDirectory -> DirPack(file)
 		file.name.endsWith(".zip", ignoreCase = true) -> ZipPack(file)
 		file.name.endsWith(".epack", ignoreCase = true) -> openPackFile(file, actionName = "load template")
-		file.name.endsWith(".pack", ignoreCase = true) -> BinaryPack(FileSource(file))
+		file.name.endsWith(".pack", ignoreCase = true) -> openPackFile(file, actionName = "load template")
 		else -> {
 			println("Warning: Unsupported template type for ${file.name}")
 			null
@@ -357,37 +355,7 @@ fun createPackWithProgress(
 	bufferSize: Int = PACK_BUFFER_SIZE,
 	onProgress: (bytesCopied: Long, totalBytes: Long, currentFile: String) -> Unit = { _, _, _ -> }
 ) {
-	val totalBytes = contentList.sumOf { it.length }
-	val totalFiles = contentList.size
-	val buffer = ByteArray(bufferSize)
-
-	sink.createOutputStream().buffered(bufferSize).use { ostream ->
-		DataOutputStream(ostream).use { dos ->
-			var bytesCopied = 0L
-			var fileCount = 0
-
-			contentList.forEach { item ->
-				ContentMeta(item).write(dos)
-				item.createInputStream().use { istream ->
-					var read = istream.read(buffer)
-					while (read >= 0) {
-						if (read > 0) {
-							dos.write(buffer, 0, read)
-							bytesCopied += read
-							onProgress(bytesCopied, totalBytes, item.path)
-						}
-						read = istream.read(buffer)
-					}
-				}
-				fileCount++
-				if (totalBytes == 0L) {
-					onProgress(fileCount.toLong(), totalFiles.toLong(), item.path)
-				} else {
-					onProgress(bytesCopied, totalBytes, item.path)
-				}
-			}
-		}
-	}
+	BinaryPack.createWithProgress(contentList, sink, bufferSize, onProgress)
 }
 
 class ConsoleProgressBar(private val totalBytes: Long, private val totalFiles: Int) {
@@ -503,7 +471,7 @@ fun appendToEncryptedPack(pack: Pack, pass: Password256, targetFile: File) {
 fun accessEncryptedBinaryPack(src: Source, pass: Password256): Pack {
 	val sequence = EncryptedSequence.createSequence(pass)
 	val encryptedSrc = EncryptedSource(sequence, src)
-	return BinaryPack(encryptedSrc)
+	return BinaryPack.open(encryptedSrc)
 }
 
 fun viewPack(pack: Pack, templatePack: Pack? = null, override: Boolean = false) {

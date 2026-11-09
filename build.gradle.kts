@@ -9,6 +9,7 @@ repositories {
 
 dependencies {
 	implementation(project(":R3"))
+	testImplementation(kotlin("test"))
 }
 
 sourceSets {
@@ -16,6 +17,13 @@ sourceSets {
 		kotlin.srcDirs("src")
 		resources.srcDirs("resources")
 	}
+	test {
+		kotlin.srcDirs("test")
+	}
+}
+
+tasks.test {
+	useJUnitPlatform()
 }
 
 kotlin {
